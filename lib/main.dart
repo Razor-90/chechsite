@@ -5,6 +5,7 @@ import 'package:syncfusion_flutter_charts/charts.dart';
 import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'database_helper.dart'; // Импортируйте DatabaseHelper
 
 void main() => runApp(MyApp());
 
@@ -59,6 +60,7 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
   @override
   void initState() {
     super.initState();
+    loadSiteHistories();
     checkSites();
     timer = Timer.periodic(Duration(minutes: 30), (Timer t) => checkSites());
   }
@@ -69,57 +71,59 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
     super.dispose();
   }
 
+  Future<void> loadSiteHistories() async {
+    try {
+      for (String site in sites) {
+        final history = await DatabaseHelper().getSiteHistory(site);
+        siteHistory[site] = history.map((e) {
+          DateTime time = DateTime.parse(e['timestamp'] as String);
+          int status = e['status'] as int;
+          return ChartData(time, status);
+        }).toList();
+      }
+      setState(() {});
+    } catch (e) {
+      print('Ошибка при загрузке истории сайтов: $e');
+    }
+  }
+
   Future<void> checkSites() async {
-    setState(() {
-      isLoading = true;
-    });
+    setState(() => isLoading = true);
 
     List<Future<void>> futures = sites.map((site) => checkSite(site)).toList();
-
     await Future.wait(futures);
 
-    setState(() {
-      isLoading = false;
-    });
+    setState(() => isLoading = false);
   }
 
   Future<void> checkSite(String site) async {
-    final stopwatch = Stopwatch()..start();
     try {
+      final startTime = DateTime.now();
       final response = await http.get(Uri.parse(site));
-      stopwatch.stop();
-      final responseTime = stopwatch.elapsedMilliseconds;
-      siteResponseTimes[site] = responseTime;
+      final endTime = DateTime.now();
+      final responseTime = endTime.difference(startTime).inMilliseconds;
 
       if (response.statusCode == 200) {
         siteStatus[site] = 'Работает';
         siteSslStatus[site] = Uri.parse(site).scheme == 'https'
             ? 'SSL присутствует'
             : 'SSL отсутствует';
-
         final document = html_parser.parse(response.body);
         final titleElement = document.head?.getElementsByTagName('title').first;
         siteTitles[site] = titleElement?.text ?? 'Без заголовка';
 
-        siteHeaders[site] = response.headers;
+        // Сохранение дополнительных данных
+        siteResponseTimes[site] = responseTime;
+        siteHeaders[site] = response.headers.map((k, v) => MapEntry(k, v));
         siteContentLengths[site] = response.contentLength;
         siteLastModified[site] = response.headers['last-modified'];
         siteKeywordsFound[site] =
-            document.body?.text.contains('important keyword') ?? false;
+            document.body?.text.contains('keyword') ?? false;
       } else {
-        siteStatus[site] = 'Не работает';
-        siteSslStatus[site] = 'Не определено';
-        siteTitles[site] = 'Не определено';
+        _handleSiteError(site, 'Не работает');
       }
     } catch (e) {
-      siteStatus[site] = 'Ошибка';
-      siteSslStatus[site] = 'Не определено';
-      siteTitles[site] = 'Ошибка';
-      siteResponseTimes[site] = null;
-      siteHeaders[site] = null;
-      siteContentLengths[site] = null;
-      siteLastModified[site] = null;
-      siteKeywordsFound[site] = null;
+      _handleSiteError(site, 'Ошибка');
     }
 
     try {
@@ -130,8 +134,6 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
     }
 
     updateSiteHistory(site);
-
-    setState(() {});
   }
 
   Future<String?> getScreenshotUrl(String site) async {
@@ -152,14 +154,22 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
     return null;
   }
 
+  void _handleSiteError(String site, String status) {
+    siteStatus[site] = status;
+    siteSslStatus[site] = 'Не определено';
+    siteTitles[site] = 'Не определено';
+  }
+
   void updateSiteHistory(String site) {
-    String timestamp = DateTime.now().toString();
     String status = siteStatus[site] ?? 'Не проверено';
+    int statusValue = status == 'Работает' ? 1 : 0;
+
+    DatabaseHelper().insertSiteHistory(site, DateTime.now(), statusValue);
+
     if (siteHistory[site] == null) {
       siteHistory[site] = [];
     }
-    siteHistory[site]!
-        .add(ChartData(DateTime.now(), status == 'Работает' ? 1 : 0));
+    siteHistory[site]!.add(ChartData(DateTime.now(), statusValue));
   }
 
   void addSite(String site) {
@@ -183,6 +193,8 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
       siteLastModified.remove(site);
       siteKeywordsFound.remove(site);
     });
+    // Необходимо сохранить состояние после удаления сайта
+    // await saveData(); // Если сохранение данных все еще нужно
   }
 
   @override
@@ -210,17 +222,20 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
                     controller: siteController,
                     decoration: InputDecoration(
                       labelText: 'Добавить сайт',
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12),
                     ),
                   ),
                 ),
-                IconButton(
-                  icon: Icon(Icons.add),
+                SizedBox(width: 8),
+                ElevatedButton(
                   onPressed: () {
                     if (siteController.text.isNotEmpty) {
                       addSite(siteController.text);
                       siteController.clear();
                     }
                   },
+                  child: Text('Добавить'),
                 ),
               ],
             ),
@@ -229,7 +244,8 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
             child: isLoading
                 ? Center(child: CircularProgressIndicator())
                 : ListView.separated(
-                    separatorBuilder: (context, index) => Divider(),
+                    separatorBuilder: (context, index) =>
+                        Divider(height: 1, color: Colors.grey[300]),
                     itemCount: sites.length,
                     itemBuilder: (context, index) {
                       String site = sites[index];
@@ -250,46 +266,49 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
                           leading: CircleAvatar(
                             backgroundImage:
                                 AssetImage('assets/default_icon.png'),
-                            child: Icon(Icons.language),
+                            child: Icon(Icons.language, color: Colors.white),
                             radius: 20,
                           ),
                           title: Text(title,
                               style: TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text(
-                            '$status\n$sslStatus\nResponse Time: ${responseTime ?? 'N/A'} ms\nContent Length: ${contentLength ?? 'N/A'} bytes\nLast Modified: ${lastModified ?? 'N/A'}\nKeywords Found: ${keywordsFound != null && keywordsFound ? 'Yes' : 'No'}',
-                          ),
+                          subtitle: Text('$status\n$sslStatus',
+                              style: TextStyle(color: Colors.grey[600])),
                           children: [
                             if (siteHistory[site] != null &&
                                 siteHistory[site]!.isNotEmpty)
-                              SizedBox(
-                                height: 200,
-                                child: SfCartesianChart(
-                                  primaryXAxis: DateTimeAxis(
-                                    title: AxisTitle(text: 'Дата и время'),
-                                    dateFormat: DateFormat('dd/MM/yyyy HH:mm'),
-                                  ),
-                                  primaryYAxis: NumericAxis(
-                                    title: AxisTitle(text: 'Статус'),
-                                    minimum: 0,
-                                    maximum: 1,
-                                    interval: 1,
-                                    labelFormat: '{value}',
-                                  ),
-                                  series: <ChartSeries>[
-                                    LineSeries<ChartData, DateTime>(
-                                      dataSource: siteHistory[site]!,
-                                      xValueMapper: (ChartData data, _) =>
-                                          data.time,
-                                      yValueMapper: (ChartData data, _) =>
-                                          data.status,
-                                      color: Colors.blue,
-                                      width: 2,
-                                      markerSettings:
-                                          MarkerSettings(isVisible: true),
+                              Padding(
+                                padding: const EdgeInsets.all(8.0),
+                                child: SizedBox(
+                                  height: 200,
+                                  child: SfCartesianChart(
+                                    primaryXAxis: DateTimeAxis(
+                                      title: AxisTitle(text: 'Дата и время'),
+                                      dateFormat:
+                                          DateFormat('dd/MM/yyyy HH:mm'),
                                     ),
-                                  ],
-                                  tooltipBehavior:
-                                      TooltipBehavior(enable: true),
+                                    primaryYAxis: NumericAxis(
+                                      title: AxisTitle(text: 'Статус'),
+                                      minimum: 0,
+                                      maximum: 1,
+                                      interval: 1,
+                                      labelFormat: '{value}',
+                                    ),
+                                    series: <ChartSeries>[
+                                      LineSeries<ChartData, DateTime>(
+                                        dataSource: siteHistory[site]!,
+                                        xValueMapper: (ChartData data, _) =>
+                                            data.time,
+                                        yValueMapper: (ChartData data, _) =>
+                                            data.status,
+                                        color: Colors.blue,
+                                        width: 2,
+                                        markerSettings:
+                                            MarkerSettings(isVisible: true),
+                                      ),
+                                    ],
+                                    tooltipBehavior:
+                                        TooltipBehavior(enable: true),
+                                  ),
                                 ),
                               ),
                             if (screenshotUrl != null)
@@ -303,6 +322,42 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
                                   errorWidget: (context, url, error) =>
                                       Icon(Icons.error),
                                 ),
+                              ),
+                            if (responseTime != null)
+                              ListTile(
+                                leading: Icon(Icons.timer),
+                                title: Text('Время отклика'),
+                                subtitle: Text('${responseTime} мс'),
+                              ),
+                            if (headers != null)
+                              ListTile(
+                                leading: Icon(Icons.info),
+                                title: Text('Заголовки'),
+                                subtitle: Text(
+                                  headers.entries
+                                      .map((e) => '${e.key}: ${e.value}')
+                                      .join(', '),
+                                ),
+                              ),
+                            if (contentLength != null)
+                              ListTile(
+                                leading: Icon(Icons.data_usage),
+                                title: Text('Длина контента'),
+                                subtitle: Text('${contentLength} байт'),
+                              ),
+                            if (lastModified != null)
+                              ListTile(
+                                leading: Icon(Icons.date_range),
+                                title: Text('Дата последнего изменения'),
+                                subtitle: Text(lastModified!),
+                              ),
+                            if (keywordsFound != null)
+                              ListTile(
+                                leading: Icon(keywordsFound!
+                                    ? Icons.check
+                                    : Icons.cancel),
+                                title: Text('Ключевое слово найдено'),
+                                subtitle: Text(keywordsFound! ? 'Да' : 'Нет'),
                               ),
                           ],
                           trailing: IconButton(
@@ -327,4 +382,14 @@ class ChartData {
   final int status;
 
   ChartData(this.time, this.status);
+
+  Map<String, dynamic> toJson() => {
+        'time': time.toIso8601String(),
+        'status': status,
+      };
+
+  factory ChartData.fromJson(Map<String, dynamic> json) => ChartData(
+        DateTime.parse(json['time']),
+        json['status'],
+      );
 }
