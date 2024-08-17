@@ -5,7 +5,6 @@ import 'package:syncfusion_flutter_charts/charts.dart';
 import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'database_helper.dart'; // Импортируйте DatabaseHelper
 
 void main() => runApp(MyApp());
 
@@ -49,13 +48,17 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
   Map<String, String> siteTitles = {};
   Map<String, String?> siteScreenshots = {};
   Map<String, List<ChartData>> siteHistory = {};
+  Map<String, int?> siteResponseTimes = {};
+  Map<String, Map<String, String>?> siteHeaders = {};
+  Map<String, int?> siteContentLengths = {};
+  Map<String, String?> siteLastModified = {};
+  Map<String, bool?> siteKeywordsFound = {};
   bool isLoading = true;
   Timer? timer;
 
   @override
   void initState() {
     super.initState();
-    loadSiteHistories(); // Загрузка данных при запуске
     checkSites();
     timer = Timer.periodic(Duration(minutes: 30), (Timer t) => checkSites());
   }
@@ -64,17 +67,6 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
   void dispose() {
     timer?.cancel();
     super.dispose();
-  }
-
-  Future<void> loadSiteHistories() async {
-    for (String site in sites) {
-      final history = await DatabaseHelper().getSiteHistory(site);
-      siteHistory[site] = history.map((e) {
-        DateTime time = DateTime.parse(e['timestamp'] as String);
-        int status = e['status'] as int;
-        return ChartData(time, status);
-      }).toList();
-    }
   }
 
   Future<void> checkSites() async {
@@ -92,16 +84,28 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
   }
 
   Future<void> checkSite(String site) async {
+    final stopwatch = Stopwatch()..start();
     try {
       final response = await http.get(Uri.parse(site));
+      stopwatch.stop();
+      final responseTime = stopwatch.elapsedMilliseconds;
+      siteResponseTimes[site] = responseTime;
+
       if (response.statusCode == 200) {
         siteStatus[site] = 'Работает';
         siteSslStatus[site] = Uri.parse(site).scheme == 'https'
             ? 'SSL присутствует'
             : 'SSL отсутствует';
+
         final document = html_parser.parse(response.body);
         final titleElement = document.head?.getElementsByTagName('title').first;
         siteTitles[site] = titleElement?.text ?? 'Без заголовка';
+
+        siteHeaders[site] = response.headers;
+        siteContentLengths[site] = response.contentLength;
+        siteLastModified[site] = response.headers['last-modified'];
+        siteKeywordsFound[site] =
+            document.body?.text.contains('important keyword') ?? false;
       } else {
         siteStatus[site] = 'Не работает';
         siteSslStatus[site] = 'Не определено';
@@ -111,6 +115,11 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
       siteStatus[site] = 'Ошибка';
       siteSslStatus[site] = 'Не определено';
       siteTitles[site] = 'Ошибка';
+      siteResponseTimes[site] = null;
+      siteHeaders[site] = null;
+      siteContentLengths[site] = null;
+      siteLastModified[site] = null;
+      siteKeywordsFound[site] = null;
     }
 
     try {
@@ -144,15 +153,13 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
   }
 
   void updateSiteHistory(String site) {
+    String timestamp = DateTime.now().toString();
     String status = siteStatus[site] ?? 'Не проверено';
-    int statusValue = status == 'Работает' ? 1 : 0;
-
-    DatabaseHelper().insertSiteHistory(site, DateTime.now(), statusValue);
-
     if (siteHistory[site] == null) {
       siteHistory[site] = [];
     }
-    siteHistory[site]!.add(ChartData(DateTime.now(), statusValue));
+    siteHistory[site]!
+        .add(ChartData(DateTime.now(), status == 'Работает' ? 1 : 0));
   }
 
   void addSite(String site) {
@@ -170,6 +177,11 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
       siteTitles.remove(site);
       siteHistory.remove(site);
       siteScreenshots.remove(site);
+      siteResponseTimes.remove(site);
+      siteHeaders.remove(site);
+      siteContentLengths.remove(site);
+      siteLastModified.remove(site);
+      siteKeywordsFound.remove(site);
     });
   }
 
@@ -225,6 +237,11 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
                       String sslStatus = siteSslStatus[site] ?? 'Не проверено';
                       String title = siteTitles[site] ?? 'Не определено';
                       String? screenshotUrl = siteScreenshots[site];
+                      int? responseTime = siteResponseTimes[site];
+                      Map<String, String>? headers = siteHeaders[site];
+                      int? contentLength = siteContentLengths[site];
+                      String? lastModified = siteLastModified[site];
+                      bool? keywordsFound = siteKeywordsFound[site];
 
                       return Card(
                         margin: EdgeInsets.all(8.0),
@@ -238,7 +255,9 @@ class _SiteStatusCheckerState extends State<SiteStatusChecker> {
                           ),
                           title: Text(title,
                               style: TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text('$status\n$sslStatus'),
+                          subtitle: Text(
+                            '$status\n$sslStatus\nResponse Time: ${responseTime ?? 'N/A'} ms\nContent Length: ${contentLength ?? 'N/A'} bytes\nLast Modified: ${lastModified ?? 'N/A'}\nKeywords Found: ${keywordsFound != null && keywordsFound ? 'Yes' : 'No'}',
+                          ),
                           children: [
                             if (siteHistory[site] != null &&
                                 siteHistory[site]!.isNotEmpty)
